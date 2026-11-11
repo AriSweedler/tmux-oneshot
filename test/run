@@ -1,0 +1,14 @@
+#!/usr/bin/env zsh
+# The repo check: the suite against this checkout's bin/tmux-oneshot, ending in one [OK] line.
+# The library (log.zsh and the rest) is ari-zshlib's: ARI_ZSHLIB names its lib directory, else
+# Ari's dotfiles path.
+here="${0:A:h}"
+function tmux_oneshot_suite() {
+  OTTO_TEST__ZSH_PLUGINS_TMUX_ONESHOT=true source "${here}/tmux_oneshot.test.zsh"
+}
+if tmux_oneshot_suite; then
+  print -r -- "[OK] tmux-oneshot: the suite passed"
+else
+  print -u2 -r -- "[FAIL] tmux-oneshot: the suite failed"
+  exit 1
+fi
