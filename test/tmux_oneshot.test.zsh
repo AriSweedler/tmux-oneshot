@@ -304,28 +304,29 @@ tmux_oneshot::action::debug > /dev/null 2>&1
 _t "debug mode clean on healthy db" "0" "$?"
 
 # ---------------------------------------------------------------------------
-# Loading: global → local → TMUX_ONESHOT_DIRS, merged into an index under a
-# temp XDG_STATE_HOME. TMUX_ONESHOT_DB is unset per case (the fixture's export
-# is single-file mode) and re-exported at the end of the block.
+# Loading: global, then generated, into an index under a temp XDG_STATE_HOME.
+# No source overrides another: a duplicate name or key is an error and the
+# first definition stays. TMUX_ONESHOT_DB is unset per case (the fixture's
+# export is single-file mode) and re-exported at the end of the block.
 # ---------------------------------------------------------------------------
-local _xdg_c _xdg_d _xdg_s _extra1 _fake_home _editor
+local _xdg_c _xdg_d _xdg_s _gen _allbad _editor
 _xdg_c="$(mktemp -d /tmp/tmux-oneshot-test-xdgc.XXXXX)"
 _xdg_d="$(mktemp -d /tmp/tmux-oneshot-test-xdgd.XXXXX)"
 _xdg_s="$(mktemp -d /tmp/tmux-oneshot-test-xdgs.XXXXX)"
-_extra1="$(mktemp -d /tmp/tmux-oneshot-test-extra1.XXXXX)"
-_fake_home="$(mktemp -d /tmp/tmux-oneshot-test-home.XXXXX)"
+_allbad="$(mktemp -d /tmp/tmux-oneshot-test-allbad.XXXXX)"
 local _saved_xdg_c="${XDG_CONFIG_HOME-}" _saved_xdg_d="${XDG_DATA_HOME-}" _saved_xdg_s="${XDG_STATE_HOME-}"
 local _real_index="${_saved_xdg_s:-${HOME}/.local/state}/tmux_oneshot/index.json" _real_index_before=''
 [[ -e "${_real_index}" ]] && _real_index_before="$(zstat +mtime -- "${_real_index}")"
 export XDG_CONFIG_HOME="${_xdg_c}" XDG_DATA_HOME="${_xdg_d}" XDG_STATE_HOME="${_xdg_s}"
 local _index="${_xdg_s}/tmux_oneshot/index.json"
-mkdir -p "${_xdg_c}/tmux_oneshot" "${_xdg_d}/tmux_oneshot" "${_fake_home}/oneshots"
+_gen="${_xdg_s}/tmux_oneshot/generated"
+mkdir -p "${_xdg_c}/tmux_oneshot" "${_xdg_d}/tmux_oneshot" "${_gen}"
 _editor="${_xdg_s}/editor"
 print -rl -- '#!/usr/bin/env zsh' 'print -rl -- "$@"' > "${_editor}"
 chmod +x "${_editor}"
 
 # g1/l1 share ctrl-k (key clash: l1 loses it); dup is defined in both tiers
-# (shadow: local wins, keeps row 2).
+# (duplicate: the global one stays, the generated one is dropped).
 cat > "${_xdg_c}/tmux_oneshot/macos.json" << 'EOF'
 [
   {"menu": {"name": "g1", "text": "global one"}, "cmd": "echo g1", "key": "ctrl-k"},
@@ -333,36 +334,36 @@ cat > "${_xdg_c}/tmux_oneshot/macos.json" << 'EOF'
   {"menu": {"name": "g3", "text": "global three"}, "cmd": "echo g3"}
 ]
 EOF
-cat > "${_xdg_d}/tmux_oneshot/a.json" << 'EOF'
+cat > "${_gen}/a.json" << 'EOF'
 [
-  {"menu": {"name": "l1", "text": "local one"}, "cmd": "echo l1", "key": "ctrl-k"},
-  {"menu": {"name": "dup", "text": "local dup"}, "cmd": "echo local-dup"}
+  {"menu": {"name": "l1", "text": "gen one"}, "cmd": "echo l1", "key": "ctrl-k"},
+  {"menu": {"name": "dup", "text": "gen dup"}, "cmd": "echo gen-dup"}
 ]
 EOF
-cat > "${_xdg_d}/tmux_oneshot/b.json" << 'EOF'
+cat > "${_gen}/b.json" << 'EOF'
 [
-  {"menu": {"name": "l2", "text": "local two"}, "cmd": "echo l2", "key": "ctrl-g"}
+  {"menu": {"name": "l2", "text": "gen two"}, "cmd": "echo l2", "key": "ctrl-g"}
 ]
 EOF
-echo '[{"menu": {"name": "x1"}, "cmd": "echo x1"}]' > "${_extra1}/x.json"
-echo '[{"menu": {"name": "y1"}, "cmd": "echo y1"}]' > "${_fake_home}/oneshots/y.json"
+# The retired local tier and TMUX_ONESHOT_DIRS: present, never read.
+echo '[{"menu": {"name": "old-local"}, "cmd": "echo old"}]' > "${_xdg_d}/tmux_oneshot/old.json"
 
 # A fresh launch: no caller override, counters zeroed. Run inside $(...) or
 # a subshell so the export _load performs never leaks into the suite.
 function _fresh() {
   unset TMUX_ONESHOT_DB
-  TMUX_ONESHOT_LOAD_SKIPPED=0 TMUX_ONESHOT_LOAD_SHADOWED=0 TMUX_ONESHOT_LOAD_KEYCLASH=0
+  TMUX_ONESHOT_LOAD_SKIPPED=0 TMUX_ONESHOT_LOAD_DUPLICATE=0 TMUX_ONESHOT_LOAD_KEYCLASH=0
   tmux_oneshot "$@"
 }
 
-_t "loads global then local, in file order" "g1
+_t "loads global then generated, in file order" "g1
 dup
 g3
 l1
 l2" "$(_fresh --list 2>/dev/null)"
-# Row 2 is dup, whose surviving definition is the local one.
-_t "index carries each entry's tier" "global local global local local" "$(jq -r '[.[]._tier] | join(" ")' "${_index}")"
-_t "index carries each entry's source file" "${_xdg_c}/tmux_oneshot/macos.json ${_xdg_d}/tmux_oneshot/a.json" \
+# Row 2 is dup, whose surviving definition is the global one.
+_t "index carries each entry's tier" "global global global generated generated" "$(jq -r '[.[]._tier] | join(" ")' "${_index}")"
+_t "index carries each entry's source file" "${_xdg_c}/tmux_oneshot/macos.json ${_gen}/a.json" \
   "$(jq -r '"\(.[0]._src) \(.[3]._src)"' "${_index}")"
 _t "index written under XDG_STATE_HOME" "yes" "$([[ -f "${_index}" ]] && echo yes)"
 _t "preview program: the command, colored; no description line when there is none" $'\e[36mecho g1\e[0m' \
@@ -373,69 +374,59 @@ _err_out="$(_fresh --list 2>&1 >/dev/null)"; _err_rc=$?
 chmod 755 "${_xdg_s}/tmux_oneshot"
 _t "read-only state dir: rc 1, exactly one error line" "1 1 Index dir not writable" \
   "${_err_rc} $(print -r -- "${_err_out}" | grep -c .) $(print -r -- "${_err_out}" | grep -o 'Index dir not writable')"
-_t "TMUX_ONESHOT_DIRS appends in order and expands ~" "g1 dup g3 l1 l2 x1 y1" \
-  "$(export HOME="${_fake_home}"; TMUX_ONESHOT_DIRS="${_extra1}:~/oneshots" _fresh --list 2>/dev/null | paste -sd' ' -)"
-_t "TMUX_ONESHOT_DIRS entries are tier extra" "extra extra" "$(jq -r '"\(.[5]._tier) \(.[6]._tier)"' "${_index}")"
-_err_out="$(TMUX_ONESHOT_DIRS="/nonexistent/oneshots:${_extra1}" _fresh --list 2>&1)"; _err_rc=$?
-_t "missing TMUX_ONESHOT_DIRS dir: warns" "Oneshot dir missing" "$(print -r -- "${_err_out}" | grep -o 'Oneshot dir missing')"
-_t "missing TMUX_ONESHOT_DIRS dir: skipped, rc 0" "0" "${_err_rc}"
-_t "missing TMUX_ONESHOT_DIRS dir: siblings load" "x1" "$(print -r -- "${_err_out}" | grep -x x1)"
+_t "neither XDG_DATA_HOME nor TMUX_ONESHOT_DIRS is a source" "g1 dup g3 l1 l2" \
+  "$(TMUX_ONESHOT_DIRS="${_xdg_d}/tmux_oneshot" _fresh --list 2>/dev/null | paste -sd' ' -)"
 _t "IGNORE_DIR_GLOBAL skips global only" "l1 dup l2" \
   "$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --list 2>/dev/null | paste -sd' ' -)"
-_t "IGNORE_DIR_LOCAL skips local only" "g1 dup g3" \
-  "$(TMUX_ONESHOT_IGNORE_DIR_LOCAL=1 _fresh --list 2>/dev/null | paste -sd' ' -)"
-# The generated tier lives under XDG_STATE_HOME and loads after local.
-mkdir -p "${_xdg_s}/tmux_oneshot/generated"
-echo '[{"menu": {"name": "vi_/zz", "text": "zz_editor"}, "cmd": "irun vi_zz", "window": "vi_"}]' > "${_xdg_s}/tmux_oneshot/generated/vi_.json"
-_t "generated tier loads after local" "g1 dup g3 l1 l2 vi_/zz" "$(_fresh --list 2>/dev/null | paste -sd' ' -)"
-_t "generated tier is tagged generated" "generated" "$(jq -r '.[] | select(.menu.name == "vi_/zz") | ._tier' "${_index}")"
-_t "IGNORE_DIR_GENERATED skips it" "g1 dup g3 l1 l2" \
+_t "IGNORE_DIR_GENERATED skips generated only" "g1 dup g3" \
   "$(TMUX_ONESHOT_IGNORE_DIR_GENERATED=1 _fresh --list 2>/dev/null | paste -sd' ' -)"
-rm -rf "${_xdg_s}/tmux_oneshot/generated"
+# A shell plugin's group file sorts among the generated files by name.
+echo '[{"menu": {"name": "vi_/zz", "text": "zz_editor"}, "cmd": "irun vi_zz", "window": "vi_"}]' > "${_gen}/vi_.json"
+_t "a group file loads with the generated tier" "g1 dup g3 l1 l2 vi_/zz" "$(_fresh --list 2>/dev/null | paste -sd' ' -)"
+_t "generated tier is tagged generated" "generated" "$(jq -r '.[] | select(.menu.name == "vi_/zz") | ._tier' "${_index}")"
+rm -f "${_gen}/vi_.json"
 _t "--files lists tier and path for every file that would load" \
   "global	${_xdg_c}/tmux_oneshot/macos.json
-local	${_xdg_d}/tmux_oneshot/a.json
-local	${_xdg_d}/tmux_oneshot/b.json" "$(_fresh --files 2>/dev/null)"
-_t "--files honors the ignore knobs" "1" "$(TMUX_ONESHOT_IGNORE_DIR_LOCAL=1 _fresh --files 2>/dev/null | wc -l | tr -d ' ')"
+generated	${_gen}/a.json
+generated	${_gen}/b.json" "$(_fresh --files 2>/dev/null)"
+_t "--files honors the ignore knobs" "1" "$(TMUX_ONESHOT_IGNORE_DIR_GENERATED=1 _fresh --files 2>/dev/null | wc -l | tr -d ' ')"
 _t "unknown option: error plus help" "1 1" "$(_fresh --bogus 2>&1 >/dev/null | grep -c 'Unknown option') $(_fresh --bogus 2>&1 >/dev/null | grep -c 'Usage:')"
-_t "tier is carried, not inferred from the path" "extra" \
-  "$(mkdir -p "${_xdg_c}/extra_oneshots"; cp "${_extra1}/x.json" "${_xdg_c}/extra_oneshots/"; TMUX_ONESHOT_DIRS="${_xdg_c}/extra_oneshots" _fresh --list >/dev/null 2>&1; jq -r '.[-1]._tier' "${_index}")"
 
-# Collisions: the merge keeps working; --debug reports and fails.
+# Collisions: the load keeps working; --debug reports and fails.
 _err_out="$(_fresh --list 2>&1 >/dev/null)"
-_t "duplicate name: later wins" "cmd=echo local-dup" "$(_fresh --dry-run dup 2>/dev/null | sed -n 2p)"
+_t "duplicate name: the first stays" "cmd=echo global-dup" "$(_fresh --dry-run dup 2>/dev/null | sed -n 2p)"
 _t "duplicate name: keeps the first occurrence's row" "dup" "$(_fresh --list 2>/dev/null | sed -n 2p)"
-_t "duplicate name: one warning" "1" "$(print -r -- "${_err_out}" | grep -c 'Shadowed oneshot')"
-_t "duplicate name: warning names both sources" "kept='local:${_xdg_d}/tmux_oneshot/a.json' dropped='global:${_xdg_c}/tmux_oneshot/macos.json'" \
-  "$(print -r -- "${_err_out}" | grep 'Shadowed oneshot' | grep -o "kept='[^']*' dropped='[^']*'")"
+_t "duplicate name: one error" "1" "$(print -r -- "${_err_out}" | grep -c 'Duplicate oneshot name dropped')"
+_t "duplicate name: error names both sources" "kept='global:${_xdg_c}/tmux_oneshot/macos.json' dropped='generated:${_gen}/a.json'" \
+  "$(print -r -- "${_err_out}" | grep 'Duplicate oneshot name dropped' | grep -o "kept='[^']*' dropped='[^']*'")"
 _t "duplicate key: later entry loses it" "null" "$(jq -r '.[] | select(.menu.name == "l1") | .key' "${_index}")"
 _t "duplicate key: first keeps it" "ctrl-k" "$(jq -r '.[] | select(.menu.name == "g1") | .key' "${_index}")"
 _t "duplicate key: error logged" "1" "$(print -r -- "${_err_out}" | grep -c 'Duplicate direct key dropped')"
 _t "duplicate key: expect list has the key once" "ctrl-g,ctrl-k" "$(_fresh --debug 2>/dev/null | grep -o 'expect: *.*' | sed -E 's/^expect: *//')"
 ( _fresh --debug > /dev/null 2>&1 )
-_t "--debug fails on shadow + key clash" "1" "$?"
+_t "--debug fails on a duplicate name + key clash" "1" "$?"
 _t "many files per dir load name-sorted" "a.json b.json" \
-  "$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug 2>/dev/null | grep -E '^  local' | cut -f3 | xargs -n1 basename | paste -sd' ' -)"
+  "$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug 2>/dev/null | grep -E '^  generated' | cut -f3 | xargs -n1 basename | paste -sd' ' -)"
 ( TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug > /dev/null 2>&1 )
 _t "--debug clean on a healthy multi-file tree" "0" "$?"
-_t "--debug lists one line per source" "local	2	${_xdg_d}/tmux_oneshot/a.json
-local	1	${_xdg_d}/tmux_oneshot/b.json" \
-  "$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug 2>/dev/null | grep -E '^  (global|local|extra)' | sed 's/^  //')"
+_t "--debug lists one line per source" "generated	2	${_gen}/a.json
+generated	1	${_gen}/b.json" \
+  "$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug 2>/dev/null | grep -E '^  (global|generated)' | sed 's/^  //')"
 
 # One bad file must not hide its siblings.
-echo '{}' > "${_xdg_d}/tmux_oneshot/c.json"
+echo '{}' > "${_gen}/c.json"
 _err_out="$(_fresh --list 2>&1 >/dev/null)"
 _t "bad file skipped: siblings load" "g1 dup g3 l1 l2" "$(_fresh --list 2>/dev/null | paste -sd' ' -)"
-_t "bad file skipped: error names the file" "Skipping oneshot file: not a JSON list | path='${_xdg_d}/tmux_oneshot/c.json'" \
+_t "bad file skipped: error names the file" "Skipping oneshot file: not a JSON list | path='${_gen}/c.json'" \
   "$(print -r -- "${_err_out}" | grep -o "Skipping oneshot file.*")"
 _t "bad file skipped: _load rc 0, counter 1" "rc=0 skipped=1" \
   "$(unset TMUX_ONESHOT_DB; TMUX_ONESHOT_LOAD_SKIPPED=0; tmux_oneshot::_load 2>/dev/null; echo "rc=$? skipped=${TMUX_ONESHOT_LOAD_SKIPPED}")"
 ( TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --debug > /dev/null 2>&1 )
 _t "bad file skipped: --debug rc 1" "1" "$?"
-rm -f "${_xdg_d}/tmux_oneshot/c.json"
-mkdir -p "${_extra1}/allbad"
-echo 'not json' > "${_extra1}/allbad/z.json"
-_err_out="$(TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 TMUX_ONESHOT_IGNORE_DIR_LOCAL=1 TMUX_ONESHOT_DIRS="${_extra1}/allbad" _fresh --list 2>&1)"; _err_rc=$?
+rm -f "${_gen}/c.json"
+mkdir -p "${_allbad}/tmux_oneshot"
+echo 'not json' > "${_allbad}/tmux_oneshot/z.json"
+_err_out="$(XDG_CONFIG_HOME="${_allbad}" TMUX_ONESHOT_IGNORE_DIR_GENERATED=1 _fresh --list 2>&1)"; _err_rc=$?
 _t "all files bad: rc 1" "1" "${_err_rc}"
 _t "all files bad: says so" "No loadable oneshot files" "$(print -r -- "${_err_out}" | grep -o 'No loadable oneshot files')"
 
@@ -443,22 +434,22 @@ _t "all files bad: says so" "No loadable oneshot files" "$(print -r -- "${_err_o
 rm -f "${_index}"
 _t "TMUX_ONESHOT_DB exported → single-file mode, no index" "rc=0 index=no" \
   "$(export TMUX_ONESHOT_DB="${_db}"; tmux_oneshot::_load; echo "rc=$? index=$([[ -e "${_index}" ]] && echo yes || echo no)")"
-local _seed_c _seed_d
+local _seed_c _seed_s
 _seed_c="$(mktemp -d /tmp/tmux-oneshot-test-seedc.XXXXX)"
-_seed_d="$(mktemp -d /tmp/tmux-oneshot-test-seedd.XXXXX)"
-_t "zero files → seeds local commands.json" "1
-hello world" "$(XDG_CONFIG_HOME="${_seed_c}" XDG_DATA_HOME="${_seed_d}" _fresh --list 2>/dev/null)"
-_t "seed lands in the local dir" "yes" "$([[ -f "${_seed_d}/tmux_oneshot/commands.json" ]] && echo yes)"
-_t "zero files with local ignored: no seed, rc 1" "1" \
-  "$(XDG_CONFIG_HOME="${_seed_c}" XDG_DATA_HOME="${_seed_c}" TMUX_ONESHOT_IGNORE_DIR_LOCAL=1 _fresh --list >/dev/null 2>&1; echo $?)"
-rm -rf "${_seed_c}" "${_seed_d}"
+_seed_s="$(mktemp -d /tmp/tmux-oneshot-test-seeds.XXXXX)"
+_t "zero files → seeds global commands.json" "1
+hello world" "$(XDG_CONFIG_HOME="${_seed_c}" XDG_STATE_HOME="${_seed_s}" _fresh --list 2>/dev/null)"
+_t "seed lands in the global dir" "yes" "$([[ -f "${_seed_c}/tmux_oneshot/commands.json" ]] && echo yes)"
+_t "zero files with global ignored: no seed, rc 1" "1" \
+  "$(XDG_CONFIG_HOME="${_seed_c}" XDG_STATE_HOME="${_seed_s}" TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1 _fresh --list >/dev/null 2>&1; echo $?)"
+rm -rf "${_seed_c}" "${_seed_s}"
 
 # --edit opens the defining file(s).
-_t "--edit <local name> opens its file" "${_xdg_d}/tmux_oneshot/a.json" "$(EDITOR="${_editor}" _fresh --edit dup 2>/dev/null)"
+_t "--edit <generated name> opens its file" "${_gen}/a.json" "$(EDITOR="${_editor}" _fresh --edit l1 2>/dev/null)"
 _t "--edit <global name> opens its file" "${_xdg_c}/tmux_oneshot/macos.json" "$(EDITOR="${_editor}" _fresh --edit g1 2>/dev/null)"
 _t "--edit opens every source, one per argument, in load order" "${_xdg_c}/tmux_oneshot/macos.json
-${_xdg_d}/tmux_oneshot/a.json
-${_xdg_d}/tmux_oneshot/b.json" "$(EDITOR="${_editor}" _fresh --edit 2>/dev/null)"
+${_gen}/a.json
+${_gen}/b.json" "$(EDITOR="${_editor}" _fresh --edit 2>/dev/null)"
 _t "--edit unknown name: rc 1" "1" "$(EDITOR="${_editor}" _fresh --edit nope >/dev/null 2>&1; echo $?)"
 
 # ---------------------------------------------------------------------------
@@ -481,10 +472,10 @@ local _ino_before
 _ino_before="$(_index_ino)"
 _err_out="$(_fresh --list 2>&1 >/dev/null)"
 _t "unchanged sources: the index is reused, not rewritten" "reused" "$(_index_since "${_ino_before}")"
-_t "cached load replays the shadow warning" "1" "$(print -r -- "${_err_out}" | grep -c 'Shadowed oneshot')"
+_t "cached load replays the duplicate-name error" "1" "$(print -r -- "${_err_out}" | grep -c 'Duplicate oneshot name dropped')"
 _t "cached load replays the key-clash error" "1" "$(print -r -- "${_err_out}" | grep -c 'Duplicate direct key dropped')"
-_t "cached load bumps the collision counters" "shadowed=1 keyclash=1" \
-  "$(unset TMUX_ONESHOT_DB; TMUX_ONESHOT_LOAD_SHADOWED=0 TMUX_ONESHOT_LOAD_KEYCLASH=0; tmux_oneshot::_load 2>/dev/null; echo "shadowed=${TMUX_ONESHOT_LOAD_SHADOWED} keyclash=${TMUX_ONESHOT_LOAD_KEYCLASH}")"
+_t "cached load bumps the collision counters" "duplicate=1 keyclash=1" \
+  "$(unset TMUX_ONESHOT_DB; TMUX_ONESHOT_LOAD_DUPLICATE=0 TMUX_ONESHOT_LOAD_KEYCLASH=0; tmux_oneshot::_load 2>/dev/null; echo "duplicate=${TMUX_ONESHOT_LOAD_DUPLICATE} keyclash=${TMUX_ONESHOT_LOAD_KEYCLASH}")"
 _t "cached load hands the picker the rendered menu and keys" "cached=1 menu=same keys=ctrl-g,ctrl-k" \
   "$(unset TMUX_ONESHOT_DB; tmux_oneshot::_load 2>/dev/null; _m=same; [[ "${TMUX_ONESHOT_MENU_CACHED}" == "$(tmux_oneshot::_menu)" ]] || _m=differs; echo "cached=${TMUX_ONESHOT_RENDER_CACHED} menu=${_m} keys=${TMUX_ONESHOT_KEYS_CACHED}")"
 _t "a rebuild hands the picker its renders too" "1" \
@@ -493,15 +484,15 @@ _t "single-file mode never claims a cached render" "0" \
   "$(export TMUX_ONESHOT_DB="${_db}"; tmux_oneshot::_load; echo "${TMUX_ONESHOT_RENDER_CACHED}")"
 # Same second as the build above: only the content can tell this edit apart.
 _ino_before="$(_index_ino)"
-cat > "${_xdg_d}/tmux_oneshot/b.json" << 'EOF'
+cat > "${_gen}/b.json" << 'EOF'
 [
-  {"menu": {"name": "l2", "text": "local two"}, "cmd": "echo l2", "key": "ctrl-g"},
-  {"menu": {"name": "l3", "text": "local three"}, "cmd": "echo l3"}
+  {"menu": {"name": "l2", "text": "gen two"}, "cmd": "echo l2", "key": "ctrl-g"},
+  {"menu": {"name": "l3", "text": "gen three"}, "cmd": "echo l3"}
 ]
 EOF
 _t "an edited source rebuilds, whatever its mtime" "g1 dup g3 l1 l2 l3" "$(_fresh --list 2>/dev/null | paste -sd' ' -)"
 _t "an edited source rewrote the index" "rewritten" "$(_index_since "${_ino_before}")"
-rm -f "${_xdg_d}/tmux_oneshot/b.json"
+rm -f "${_gen}/b.json"
 _t "a removed source rebuilds" "g1 dup g3 l1" "$(_fresh --list 2>/dev/null | paste -sd' ' -)"
 _ino_before="$(_index_ino)"
 ( _fresh --debug > /dev/null 2>&1 )
@@ -517,7 +508,7 @@ export TMUX_ONESHOT_DB="${_db}"
 _t "real index untouched by the loading tests" "${_real_index_before}" \
   "$([[ -e "${_real_index}" ]] && zstat +mtime -- "${_real_index}")"
 _t "single-file --edit opens the DB itself" "${_db}" "$(EDITOR="${_editor}" tmux_oneshot --edit 2>/dev/null)"
-rm -rf "${_xdg_c}" "${_xdg_d}" "${_xdg_s}" "${_extra1}" "${_fake_home}"
+rm -rf "${_xdg_c}" "${_xdg_d}" "${_xdg_s}" "${_allbad}"
 
 # ---------------------------------------------------------------------------
 # Picker: _resolve_pick (pure), the --expect key list, and _pick through the

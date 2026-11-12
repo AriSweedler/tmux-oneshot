@@ -5,15 +5,14 @@
 # opens this in a tmux popup; Hyper+O (Karabiner, src/scripts/bin/oneshot-popup)
 # opens the same popup from any app.
 #
-# Sources, merged in this order (a later definition of a menu.name wins but
-# keeps the first occurrence's menu position):
-#   1. ${XDG_CONFIG_HOME}/tmux_oneshot/*.json  tier "global" (df, every machine)
-#   2. ${XDG_DATA_HOME}/tmux_oneshot/*.json    tier "local"  (ldf, this machine)
-#   3. ${XDG_STATE_HOME}/tmux_oneshot/generated/*.json  tier "generated" (written by shell plugins)
-#   4. each dir in $TMUX_ONESHOT_DIRS (colon-separated)  tier "extra"
-# Every file is a JSON list; a file that is not one is skipped with an error
-# and its siblings still load. TMUX_ONESHOT_IGNORE_DIR_GLOBAL / _LOCAL /
-# _GENERATED (non-empty) skip a tier. The merge is written to
+# Sources, read in this order and never combined: no source overrides another.
+#   1. ${XDG_CONFIG_HOME}/tmux_oneshot/*.json  tier "global": the menu. In Ari's dotfiles, Nix
+#      builds it as one file, entries.json, from every tier (programs.tmuxOneshot).
+#   2. ${XDG_STATE_HOME}/tmux_oneshot/generated/*.json  tier "generated" (written by shell plugins)
+# A name or direct key defined twice is an error: the first definition stays and
+# the later one is dropped (its key only, for a key). Every file is a JSON list;
+# a file that is not one is skipped with an error and its siblings still load.
+# TMUX_ONESHOT_IGNORE_DIR_GLOBAL / _GENERATED (non-empty) skip a tier. The merge is written to
 # ${XDG_STATE_HOME}/tmux_oneshot/index.json and TMUX_ONESHOT_DB points at it;
 # a TMUX_ONESHOT_DB exported by the caller is used as-is instead (single-file
 # mode — tests, one-off debugging). Beside the index sit its cache siblings
@@ -87,7 +86,7 @@
 #   subcommands  list of nested entries (recursive: cmd/flags/subcommands/
 #                description) — pick one, then its args resolve in turn
 #   _src, _tier  injected by the loader, never authored: the defining file
-#                and its tier ("global" | "local" | "generated" | "extra"). Shown in the
+#                and its tier ("global" | "generated"). Shown in the
 #                preview; used by --edit, --debug and --dry-run.
 #
 # Surface — where the assembled cmd runs. An entry's window field always wins; every
@@ -205,12 +204,10 @@ ${c_cyan}Surface${c_rst} (where the picked cmd runs; an entry's window field alw
   current     ${c_grey}${TMUX_ONESHOT_SURFACE:-${TMUX_ONESHOT_DEFAULT_SURFACE}}${c_rst} — flip it for every launch with
               tmux setenv -g TMUX_ONESHOT_SURFACE popup
 
-${c_cyan}Sources${c_rst} (later wins on a duplicate name):
+${c_cyan}Sources${c_rst} (never combined: a duplicate name or key is an error, the first stays):
   global     ${c_grey}${XDG_CONFIG_HOME:-${HOME}/.config}/tmux_oneshot/*.json${c_rst}   skip: TMUX_ONESHOT_IGNORE_DIR_GLOBAL=1
-  local      ${c_grey}${XDG_DATA_HOME:-${HOME}/.local/share}/tmux_oneshot/*.json${c_rst}   skip: TMUX_ONESHOT_IGNORE_DIR_LOCAL=1
   generated  ${c_grey}${XDG_STATE_HOME:-${HOME}/.local/state}/tmux_oneshot/generated/*.json${c_rst}   skip: TMUX_ONESHOT_IGNORE_DIR_GENERATED=1
              written by shell plugins at startup (oneshot_group.zsh); never edit by hand
-  extra      \$TMUX_ONESHOT_DIRS, colon-separated dirs (currently: ${c_grey}${TMUX_ONESHOT_DIRS:-unset}${c_rst})
   index      ${c_grey}${XDG_STATE_HOME:-${HOME}/.local/state}/tmux_oneshot/index.json${c_rst}   rebuilt every launch
   TMUX_ONESHOT_DB=<file> forces single-file mode: that file only, no index.
 EOF
@@ -226,22 +223,11 @@ function tmux_oneshot::action::files() {
 # Loading
 # ---------------------------------------------------------------------------
 
-# Output: "tier\tdir" per source dir, in load order (later dirs win on
-# duplicate names). Missing default dirs are silent; a missing
-# TMUX_ONESHOT_DIRS entry was typed by hand, so it warns.
+# Output: "tier\tdir" per source dir, in load order (on a duplicate name the
+# earlier dir's entry stays). A missing dir is silent.
 function tmux_oneshot::_dirs() {
   [[ -z "${TMUX_ONESHOT_IGNORE_DIR_GLOBAL:-}" ]] && print -r -- "global	${XDG_CONFIG_HOME:-${HOME}/.config}/tmux_oneshot"
-  [[ -z "${TMUX_ONESHOT_IGNORE_DIR_LOCAL:-}" ]]  && print -r -- "local	${XDG_DATA_HOME:-${HOME}/.local/share}/tmux_oneshot"
   [[ -z "${TMUX_ONESHOT_IGNORE_DIR_GENERATED:-}" ]] && print -r -- "generated	${XDG_STATE_HOME:-${HOME}/.local/state}/tmux_oneshot/generated"
-  local d
-  for d in ${(s.:.)${TMUX_ONESHOT_DIRS:-}}; do
-    d="${d/#\~/${HOME}}"
-    if [[ ! -d "${d}" ]]; then
-      log::warn "Oneshot dir missing | dir='${d}'"
-      continue
-    fi
-    print -r -- "extra	${d}"
-  done
   return 0
 }
 
@@ -254,11 +240,11 @@ function tmux_oneshot::_files() {
   done < <(tmux_oneshot::_dirs)
 }
 
-# Fresh machine: no entry file anywhere → starter entries into the local dir.
-# The global dir is df-managed and never seeded.
+# Fresh machine: no entry file anywhere → starter entries into the global dir.
+# A machine whose menu Nix builds always has entries.json there, so is never seeded.
 function tmux_oneshot::_seed() {
-  [[ -n "${TMUX_ONESHOT_IGNORE_DIR_LOCAL:-}" ]] && return 0
-  local f="${XDG_DATA_HOME:-${HOME}/.local/share}/tmux_oneshot/commands.json"
+  [[ -n "${TMUX_ONESHOT_IGNORE_DIR_GLOBAL:-}" ]] && return 0
+  local f="${XDG_CONFIG_HOME:-${HOME}/.config}/tmux_oneshot/commands.json"
   mkdir -p "${f:h}" || return 1
   cat > "${f}" << 'EOF'
 [
@@ -271,17 +257,17 @@ EOF
 }
 
 # Load counters read by --debug (a healthy tree has all three at 0).
-typeset -gi TMUX_ONESHOT_LOAD_SKIPPED=0 TMUX_ONESHOT_LOAD_SHADOWED=0 TMUX_ONESHOT_LOAD_KEYCLASH=0
+typeset -gi TMUX_ONESHOT_LOAD_SKIPPED=0 TMUX_ONESHOT_LOAD_DUPLICATE=0 TMUX_ONESHOT_LOAD_KEYCLASH=0
 
 # jq defs shared by the index writer and the collision report, so both see
-# the same merge: later definition wins its name but keeps the first
-# occurrence's row; a key already claimed by an earlier row is dropped from
-# the later one (fzf --expect needs each key once).
+# the same load: no source overrides another, so a name already defined is
+# dropped from the later row, and a key already claimed by an earlier row is
+# dropped from the later one (fzf --expect needs each key once).
 TMUX_ONESHOT_JQ_MERGEDEF='
   def k: (.menu.name // .cmd // "?");
   def loc: "\(._tier):\(._src)";
-  def merge_names: reduce .[] as $e ([]; ($e | k) as $n
-    | if any(.[]; k == $n) then map(if k == $n then $e else . end) else . + [$e] end);
+  def first_names: reduce .[] as $e ([]; ($e | k) as $n
+    | if any(.[]; k == $n) then . else . + [$e] end);
   def clashing_keys: [range(0; length) as $i | .[$i].key as $key
     | select($key != null and (([.[:$i][] | .key // empty] | index($key)) != null)) | $i];
   def drop_clashing_keys: . as $m | reduce clashing_keys[] as $i ($m; .[$i] |= del(.key));
@@ -348,7 +334,7 @@ function tmux_oneshot::_load() {
 
   # Written beside, then mv'd: two concurrent popups never read a half file.
   if ! printf '%s\n' "${parts[@]}" \
-      | jq -s "${TMUX_ONESHOT_JQ_MERGEDEF} add | merge_names | drop_clashing_keys" > "${index}.$$"; then
+      | jq -s "${TMUX_ONESHOT_JQ_MERGEDEF} add | first_names | drop_clashing_keys" > "${index}.$$"; then
     zf_rm -f "${index}.$$"
     log::fail "Cannot write index | path='${index}'"
     return 1
@@ -362,26 +348,26 @@ function tmux_oneshot::_load() {
 }
 
 # Input: the tagged per-file arrays. Output: one "kind\tname\tkept\tdropped" line
-# per shadowed name (shadow) and per dropped key (key) — what
+# per duplicate name (dup) and per dropped key (key) — what
 # _report_collision_lines logs and what the cache replays.
 function tmux_oneshot::_collisions_tsv() {
   printf '%s\n' "$@" | jq -rs "${TMUX_ONESHOT_JQ_MERGEDEF}"'
     add
     | (group_by(k) | .[] | select(length > 1) | . as $g
-        | "shadow\t\($g[0] | k)\t\($g[-1] | loc)\t\($g[:-1][] | loc)"),
-      (merge_names | . as $m | clashing_keys[] as $i
+        | "dup\t\($g[0] | k)\t\($g[0] | loc)\t\($g[1:][] | loc)"),
+      (first_names | . as $m | clashing_keys[] as $i
         | "key\t\($m[$i].key)\t\($m | map(select(.key == $m[$i].key))[0] | loc)\t\($m[$i] | loc)")'
 }
 
-# Input (stdin): _collisions_tsv lines. Logs one warn per shadowed name and one
+# Input (stdin): _collisions_tsv lines. Logs one error per duplicate name and one
 # error per dropped key; bumps the counters --debug fails on.
 function tmux_oneshot::_report_collision_lines() {
   local kind name kept dropped
   while IFS=$'\t' read -r kind name kept dropped; do
     case "${kind}" in
-      shadow)
-        log::warn "Shadowed oneshot | name='${name}' kept='${kept}' dropped='${dropped}'"
-        (( TMUX_ONESHOT_LOAD_SHADOWED += 1 ))
+      dup)
+        log::err "Duplicate oneshot name dropped | name='${name}' kept='${kept}' dropped='${dropped}'"
+        (( TMUX_ONESHOT_LOAD_DUPLICATE += 1 ))
         ;;
       key)
         log::err "Duplicate direct key dropped | key='${name}' kept='${kept}' dropped='${dropped}'"
@@ -789,7 +775,7 @@ function tmux_oneshot::_resolve_pick() {
 # Non-interactive diagnostic: exercises every popup code path except the fzf
 # UI itself — the loaded sources, the batch menu render, the hidden index
 # column, the exact preview jq fzf would run per row, and the direct-key
-# list. Fails on anything the loader had to skip, shadow or de-key. For
+# list. Fails on anything the loader had to skip, drop or de-key. For
 # agents/humans without a tty.
 function tmux_oneshot::action::debug() {
   local rc=0 menu line idx
@@ -863,8 +849,8 @@ function tmux_oneshot::action::debug() {
   print -r -- "  expect:   ${keys}"
   print -r -- "  keys:     $(tmux_oneshot::_key_list)"
   print -r -- "  reserved: ${(j: :)TMUX_ONESHOT_RESERVED_KEYS}"
-  if (( TMUX_ONESHOT_LOAD_SKIPPED + TMUX_ONESHOT_LOAD_SHADOWED + TMUX_ONESHOT_LOAD_KEYCLASH > 0 )); then
-    log::err "Load collisions | skipped='${TMUX_ONESHOT_LOAD_SKIPPED}' shadowed='${TMUX_ONESHOT_LOAD_SHADOWED}' keyclash='${TMUX_ONESHOT_LOAD_KEYCLASH}'"
+  if (( TMUX_ONESHOT_LOAD_SKIPPED + TMUX_ONESHOT_LOAD_DUPLICATE + TMUX_ONESHOT_LOAD_KEYCLASH > 0 )); then
+    log::err "Load collisions | skipped='${TMUX_ONESHOT_LOAD_SKIPPED}' duplicate='${TMUX_ONESHOT_LOAD_DUPLICATE}' keyclash='${TMUX_ONESHOT_LOAD_KEYCLASH}'"
     rc=1
   fi
   (( rc == 0 )) && log::info "Debug render clean | entries='${entries}'"
